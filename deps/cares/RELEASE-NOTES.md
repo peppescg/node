@@ -1,40 +1,60 @@
-## c-ares version 1.27.0 - Feb 23 2024
+## c-ares version 1.34.1 - Octover 9 2024
 
-This is a security, feature, and bugfix release.
+This release fixes a packaging issue.
 
-Security:
 
-* Moderate. CVE-2024-25629. Reading malformatted `/etc/resolv.conf`,
-  `/etc/nsswitch.conf` or the `HOSTALIASES` file could result in a crash.
-  [GHSA-mg26-v6qh-x48q](https://github.com/c-ares/c-ares/security/advisories/GHSA-mg26-v6qh-x48q)
+## c-ares version 1.34.0 - October 9 2024
+
+This is a feature and bugfix release.
 
 Features:
-
-* New function `ares_queue_active_queries()` to retrieve number of in-flight
-  queries. [PR #712](https://github.com/c-ares/c-ares/pull/712)
-* New function `ares_queue_wait_empty()` to wait for the number of in-flight
-  queries to reach zero. [PR #710](https://github.com/c-ares/c-ares/pull/710)
-* New `ARES_FLAG_NO_DEFLT_SVR` for `ares_init_options()` to return a failure if
-  no DNS servers can be found rather than attempting to use `127.0.0.1`. This
-  also introduces a new ares status code of `ARES_ENOSERVER`. [PR #713](https://github.com/c-ares/c-ares/pull/713)
+* adig: read arguments from adigrc.
+  [PR #856](https://github.com/c-ares/c-ares/pull/856)
+* Add new pending write callback optimization via `ares_set_pending_write_cb`.
+  [PR #857](https://github.com/c-ares/c-ares/pull/857)
+* New function `ares_process_fds()`.
+  [PR #875](https://github.com/c-ares/c-ares/pull/875)
+* Failed servers should be probed rather than redirecting queries which could
+  cause unexpected latency.
+  [PR #877](https://github.com/c-ares/c-ares/pull/877)
+* adig: rework command line arguments to mimic dig from bind.
+  [PR #890](https://github.com/c-ares/c-ares/pull/890)
+* Add new method for overriding network functions
+  `ares_set_socket_function_ex()` to properly support all new functionality.
+  [PR #894](https://github.com/c-ares/c-ares/pull/894)
+* Fix regression with custom socket callbacks due to DNS cookie support.
+  [PR #895](https://github.com/c-ares/c-ares/pull/895)
+* ares_socket: set IP_BIND_ADDRESS_NO_PORT on ares_set_local_ip* tcp sockets
+  [PR #887](https://github.com/c-ares/c-ares/pull/887)
+* URI parser/writer for ares_set_servers_csv()/ares_get_servers_csv().
+  [PR #882](https://github.com/c-ares/c-ares/pull/882)
 
 Changes:
+* Connection handling modularization.
+  [PR #857](https://github.com/c-ares/c-ares/pull/857),
+  [PR #876](https://github.com/c-ares/c-ares/pull/876)
+* Expose library/utility functions to tools.
+  [PR #860](https://github.com/c-ares/c-ares/pull/860)
+* Remove `ares__` prefix, just use `ares_` for internal functions.
+  [PR #872](https://github.com/c-ares/c-ares/pull/872)
 
-* EDNS Packet size should be 1232 as per DNS Flag Day. [PR #705](https://github.com/c-ares/c-ares/pull/705)
 
 Bugfixes:
+* fix: potential WIN32_LEAN_AND_MEAN redefinition.
+  [PR #869](https://github.com/c-ares/c-ares/pull/869)
+* Fix googletest v1.15 compatibility.
+  [PR #874](https://github.com/c-ares/c-ares/pull/874)
+* Fix pkgconfig thread dependencies.
+  [PR #884](https://github.com/c-ares/c-ares/pull/884)
 
-* Windows DNS suffix search list memory leak. [PR #711](https://github.com/c-ares/c-ares/pull/711)
-* Fix warning due to ignoring return code of `write()`. [PR #709](https://github.com/c-ares/c-ares/pull/709)
-* CMake: don't override target output locations if not top-level. [Issue #708](https://github.com/c-ares/c-ares/issues/708)
-* Fix building c-ares without thread support. [PR #700](https://github.com/c-ares/c-ares/pull/700)
 
-Thanks go to these friendly people for their efforts and contributions for this release:
+Thanks go to these friendly people for their efforts and contributions for this
+release:
 
-* Anthony Alayo (@anthonyalayo)
 * Brad House (@bradh352)
-* Cheng Zhao (@zcbenz)
 * Cristian Rodríguez (@crrodriguez)
-* Daniel Stenberg (@bagder)
-* Oliver Welsh (@oliverwelsh)
-* Vojtěch Vobr (@vojtechvobr)
+* Georg (@tacerus)
+* @lifenjoiner
+* Shelley Vohr (@codebytere)
+* 前进，前进，进 (@leleliu008)
+

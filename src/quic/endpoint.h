@@ -17,8 +17,12 @@
 #include "sessionticket.h"
 #include "tokens.h"
 
-namespace node {
-namespace quic {
+namespace node::quic {
+
+#define ENDPOINT_CC(V)                                                         \
+  V(RENO, reno)                                                                \
+  V(CUBIC, cubic)                                                              \
+  V(BBR, bbr)
 
 // An Endpoint encapsulates the UDP local port binding and is responsible for
 // sending and receiving QUIC packets. A single endpoint can act as both a QUIC
@@ -33,9 +37,9 @@ class Endpoint final : public AsyncWrap, public Packet::Listener {
   static constexpr uint64_t DEFAULT_MAX_STATELESS_RESETS = 10;
   static constexpr uint64_t DEFAULT_MAX_RETRY_LIMIT = 10;
 
-  static constexpr auto QUIC_CC_ALGO_RENO = NGTCP2_CC_ALGO_RENO;
-  static constexpr auto QUIC_CC_ALGO_CUBIC = NGTCP2_CC_ALGO_CUBIC;
-  static constexpr auto QUIC_CC_ALGO_BBR = NGTCP2_CC_ALGO_BBR;
+#define V(name, _) static constexpr auto CC_ALGO_##name = NGTCP2_CC_ALGO_##name;
+  ENDPOINT_CC(V)
+#undef V
 
   // Endpoint configuration options
   struct Options final : public MemoryRetainer {
@@ -87,7 +91,7 @@ class Endpoint final : public AsyncWrap, public Packet::Listener {
     // Similar to stateless resets, we enforce a limit on the number of retry
     // packets that can be generated and sent for a remote host. Generating
     // retry packets consumes a modest amount of resources and it's fairly
-    // trivial for a malcious peer to trigger generation of a large number of
+    // trivial for a malicious peer to trigger generation of a large number of
     // retries, so limiting them helps prevent a DOS vector.
     uint64_t max_retries = DEFAULT_MAX_RETRY_LIMIT;
 
@@ -144,7 +148,7 @@ class Endpoint final : public AsyncWrap, public Packet::Listener {
     // which to use by default is arbitrary and we can choose whichever we'd
     // like. Additional performance profiling will be needed to determine which
     // is the better of the two for our needs.
-    ngtcp2_cc_algo cc_algorithm = NGTCP2_CC_ALGO_CUBIC;
+    ngtcp2_cc_algo cc_algorithm = CC_ALGO_CUBIC;
 
     // By default, when the endpoint is created, it will generate a
     // reset_token_secret at random. This is a secret used in generating
@@ -409,8 +413,12 @@ class Endpoint final : public AsyncWrap, public Packet::Listener {
   const Options options_;
   UDP udp_;
 
+  struct ServerState {
+    Session::Options options;
+    std::shared_ptr<TLSContext> tls_context;
+  };
   // Set if/when the endpoint is configured to listen.
-  std::optional<Session::Options> server_options_{};
+  std::optional<ServerState> server_state_ = std::nullopt;
 
   // A Session is generally identified by one or more CIDs. We use two
   // maps for this rather than one to avoid creating a whole bunch of
@@ -444,8 +452,7 @@ class Endpoint final : public AsyncWrap, public Packet::Listener {
   friend class Session;
 };
 
-}  // namespace quic
-}  // namespace node
+}  // namespace node::quic
 
 #endif  // HAVE_OPENSSL && NODE_OPENSSL_HAS_QUIC
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

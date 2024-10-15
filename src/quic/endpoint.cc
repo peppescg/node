@@ -9,6 +9,7 @@
 #include <ngtcp2/ngtcp2.h>
 #include <node_errors.h>
 #include <node_external_reference.h>
+#include <node_process-inl.h>
 #include <node_sockaddr-inl.h>
 #include <req_wrap-inl.h>
 #include <util-inl.h>
@@ -18,6 +19,7 @@
 #include "application.h"
 #include "bindingdata.h"
 #include "defs.h"
+#include "ncrypto.h"
 
 namespace node {
 
@@ -71,11 +73,6 @@ namespace quic {
   V(STATELESS_RESET_COUNT, stateless_reset_count)                              \
   V(IMMEDIATE_CLOSE_COUNT, immediate_close_count)
 
-#define ENDPOINT_CC(V)                                                         \
-  V(RENO, reno)                                                                \
-  V(CUBIC, cubic)                                                              \
-  V(BBR, bbr)
-
 struct Endpoint::State {
 #define V(_, name, type) type name;
   ENDPOINT_STATE(V)
@@ -89,9 +86,11 @@ STAT_STRUCT(Endpoint, ENDPOINT)
 namespace {
 #ifdef DEBUG
 bool is_diagnostic_packet_loss(double probability) {
-  if (LIKELY(probability == 0.0)) return false;
+  if (probability == 0.0) [[unlikely]] {
+    return false;
+  }
   unsigned char c = 255;
-  CHECK(crypto::CSPRNG(&c, 1).is_ok());
+  CHECK(ncrypto::CSPRNG(&c, 1));
   return (static_cast<double>(c) / 255) < probability;
 }
 #endif  // DEBUG
@@ -236,6 +235,7 @@ bool SetOption(Environment* env,
 Maybe<Endpoint::Options> Endpoint::Options::From(Environment* env,
                                                  Local<Value> value) {
   if (value.IsEmpty() || !value->IsObject()) {
+    if (value->IsUndefined()) return Just(Endpoint::Options());
     THROW_ERR_INVALID_ARG_TYPE(env, "options must be an object");
     return Nothing<Options>();
   }
@@ -340,12 +340,11 @@ std::string Endpoint::Options::ToString() const {
 
   auto ccalg = ([&] {
     switch (cc_algorithm) {
-      case NGTCP2_CC_ALGO_RENO:
-        return "reno";
-      case NGTCP2_CC_ALGO_CUBIC:
-        return "cubic";
-      case NGTCP2_CC_ALGO_BBR:
-        return "bbr";
+#define V(name, label)                                                         \
+  case NGTCP2_CC_ALGO_##name:                                                  \
+    return #label;
+      ENDPOINT_CC(V)
+#undef V
     }
     return "<unknown>";
   })();
@@ -622,13 +621,13 @@ void Endpoint::InitPerIsolate(IsolateData* data, Local<ObjectTemplate> target) {
 
 void Endpoint::InitPerContext(Realm* realm, Local<Object> target) {
 #define V(name, str)                                                           \
-  NODE_DEFINE_CONSTANT(target, QUIC_CC_ALGO_##name);                           \
-  NODE_DEFINE_STRING_CONSTANT(target, "QUIC_CC_ALGO_" #name "_STR", #str);
+  NODE_DEFINE_CONSTANT(target, CC_ALGO_##name);                                \
+  NODE_DEFINE_STRING_CONSTANT(target, "CC_ALGO_" #name "_STR", #str);
   ENDPOINT_CC(V)
 #undef V
 
 #define V(name, _) IDX_STATS_ENDPOINT_##name,
-  enum IDX_STATS_ENDPONT { ENDPOINT_STATS(V) IDX_STATS_ENDPOINT_COUNT };
+  enum IDX_STATS_ENDPOINT { ENDPOINT_STATS(V) IDX_STATS_ENDPOINT_COUNT };
   NODE_DEFINE_CONSTANT(target, IDX_STATS_ENDPOINT_COUNT);
 #undef V
 
@@ -660,6 +659,25 @@ void Endpoint::InitPerContext(Realm* realm, Local<Object> target) {
   NODE_DEFINE_CONSTANT(target, DEFAULT_REGULARTOKEN_EXPIRATION);
   NODE_DEFINE_CONSTANT(target, DEFAULT_MAX_PACKET_LENGTH);
 
+  static constexpr auto CLOSECONTEXT_CLOSE =
+      static_cast<int>(CloseContext::CLOSE);
+  static constexpr auto CLOSECONTEXT_BIND_FAILURE =
+      static_cast<int>(CloseContext::BIND_FAILURE);
+  static constexpr auto CLOSECONTEXT_LISTEN_FAILURE =
+      static_cast<int>(CloseContext::LISTEN_FAILURE);
+  static constexpr auto CLOSECONTEXT_RECEIVE_FAILURE =
+      static_cast<int>(CloseContext::RECEIVE_FAILURE);
+  static constexpr auto CLOSECONTEXT_SEND_FAILURE =
+      static_cast<int>(CloseContext::SEND_FAILURE);
+  static constexpr auto CLOSECONTEXT_START_FAILURE =
+      static_cast<int>(CloseContext::START_FAILURE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_CLOSE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_BIND_FAILURE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_LISTEN_FAILURE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_RECEIVE_FAILURE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_SEND_FAILURE);
+  NODE_DEFINE_CONSTANT(target, CLOSECONTEXT_START_FAILURE);
+
   SetConstructorFunction(realm->context(),
                          target,
                          "Endpoint",
@@ -686,6 +704,7 @@ Endpoint::Endpoint(Environment* env,
       udp_(this),
       addrLRU_(options_.address_lru_size) {
   MakeWeak();
+  STAT_RECORD_TIMESTAMP(Stats, created_at);
   IF_QUIC_DEBUG(env) {
     Debug(this, "Endpoint created. Options %s", options.ToString());
   }
@@ -708,6 +727,7 @@ SocketAddress Endpoint::local_address() const {
 
 void Endpoint::MarkAsBusy(bool on) {
   Debug(this, "Marking endpoint as %s", on ? "busy" : "not busy");
+  if (on) STAT_INCREMENT(Stats, server_busy_count);
   state_->busy = on ? 1 : 0;
 }
 
@@ -809,7 +829,7 @@ void Endpoint::Send(Packet* packet) {
   // When diagnostic packet loss is enabled, the packet will be randomly
   // dropped. This can happen to any type of packet. We use this only in
   // testing to test various reliability issues.
-  if (UNLIKELY(is_diagnostic_packet_loss(options_.tx_loss))) {
+  if (is_diagnostic_packet_loss(options_.tx_loss)) [[unlikely]] {
     packet->Done(0);
     // Simulating tx packet loss
     return;
@@ -878,7 +898,9 @@ void Endpoint::SendVersionNegotiation(const PathDescriptor& options) {
 
 bool Endpoint::SendStatelessReset(const PathDescriptor& options,
                                   size_t source_len) {
-  if (UNLIKELY(options_.disable_stateless_reset)) return false;
+  if (options_.disable_stateless_reset) [[unlikely]] {
+    return false;
+  }
   Debug(this,
         "Sending stateless reset on path %s with len %" PRIu64,
         options,
@@ -958,9 +980,32 @@ bool Endpoint::Start() {
 
 void Endpoint::Listen(const Session::Options& options) {
   if (is_closed() || is_closing() || state_->listening == 1) return;
-  server_options_ = options;
+  DCHECK(!server_state_.has_value());
+
+  // We need at least one key and one cert to complete the tls handshake on the
+  // server. Why not make this an error? We could but it's not strictly
+  // necessary.
+  if (options.tls_options.keys.empty() || options.tls_options.certs.empty()) {
+    env()->EmitProcessEnvWarning();
+    ProcessEmitWarning(env(),
+                       "The QUIC TLS options did not include a key or cert. "
+                       "This means the TLS handshake will fail. This is likely "
+                       "not what you want.");
+  }
+
+  auto context = TLSContext::CreateServer(options.tls_options);
+  if (!*context) {
+    THROW_ERR_INVALID_STATE(
+        env(), "Failed to create TLS context: %s", context->validation_error());
+    return;
+  }
+
+  server_state_ = {
+      options,
+      std::move(context),
+  };
   if (Start()) {
-    Debug(this, "Listening with options %s", server_options_.value());
+    Debug(this, "Listening with options %s", server_state_->options);
     state_->listening = 1;
   }
 }
@@ -972,8 +1017,7 @@ BaseObjectPtr<Session> Endpoint::Connect(
   // If starting fails, the endpoint will be destroyed.
   if (!Start()) return BaseObjectPtr<Session>();
 
-  Session::Config config(
-      *this, options, local_address(), remote_address, session_ticket);
+  Session::Config config(*this, options, local_address(), remote_address);
 
   IF_QUIC_DEBUG(env()) {
     Debug(
@@ -985,7 +1029,21 @@ BaseObjectPtr<Session> Endpoint::Connect(
         session_ticket.has_value() ? "yes" : "no");
   }
 
-  auto session = Session::Create(this, config);
+  auto tls_context = TLSContext::CreateClient(options.tls_options);
+  if (!*tls_context) {
+    THROW_ERR_INVALID_STATE(env(),
+                            "Failed to create TLS context: %s",
+                            tls_context->validation_error());
+    return BaseObjectPtr<Session>();
+  }
+  auto session =
+      Session::Create(this, config, tls_context.get(), session_ticket);
+  if (!session->tls_session()) {
+    THROW_ERR_INVALID_STATE(env(),
+                            "Failed to create TLS session: %s",
+                            session->tls_session().validation_error());
+    return BaseObjectPtr<Session>();
+  }
   if (!session) return BaseObjectPtr<Session>();
   session->set_wrapped();
 
@@ -1055,6 +1113,7 @@ void Endpoint::Destroy(CloseContext context, int status) {
   state_->bound = 0;
   state_->receiving = 0;
   BindingData::Get(env()).listening_endpoints.erase(this);
+  STAT_RECORD_TIMESTAMP(Stats, destroyed_at);
 
   EmitClose(close_context_, close_status_);
 }
@@ -1093,9 +1152,19 @@ void Endpoint::Receive(const uv_buf_t& buf,
     // as a server, then we cannot accept the initial packet.
     if (is_closed() || is_closing() || !is_listening()) return;
 
-    Debug(this, "Trying to create new session for %s", config.dcid);
-    auto session = Session::Create(this, config);
+    Debug(this, "Creating new session for %s", config.dcid);
+
+    std::optional<SessionTicket> no_ticket = std::nullopt;
+    auto session = Session::Create(
+        this, config, server_state_->tls_context.get(), no_ticket);
     if (session) {
+      if (!session->tls_session()) {
+        Debug(this,
+              "Failed to create TLS session for %s: %s",
+              config.dcid,
+              session->tls_session().validation_error());
+        return;
+      }
       receive(session.get(),
               std::move(store),
               config.local_address,
@@ -1183,7 +1252,7 @@ void Endpoint::Receive(const uv_buf_t& buf,
     // because that is the value *this* session will use as the outbound dcid.
     Session::Config config(Side::SERVER,
                            *this,
-                           server_options_.value(),
+                           server_state_->options,
                            version,
                            local_address,
                            remote_address,
@@ -1197,7 +1266,7 @@ void Endpoint::Receive(const uv_buf_t& buf,
     // identifies us. config.dcid should equal scid. config.scid should *not*
     // equal dcid.
     DCHECK(config.dcid == scid);
-    DCHECK(config.scid != dcid);
+    DCHECK(config.scid == dcid);
 
     const auto is_remote_address_validated = ([&] {
       auto info = addrLRU_.Peek(remote_address);
@@ -1431,14 +1500,14 @@ void Endpoint::Receive(const uv_buf_t& buf,
 #ifdef DEBUG
   // When diagnostic packet loss is enabled, the packet will be randomly
   // dropped.
-  if (UNLIKELY(is_diagnostic_packet_loss(options_.rx_loss))) {
+  if (is_diagnostic_packet_loss(options_.rx_loss)) [[unlikely]] {
     // Simulating rx packet loss
     return;
   }
 #endif  // DEBUG
 
   // TODO(@jasnell): Implement blocklist support
-  // if (UNLIKELY(block_list_->Apply(remote_address))) {
+  // if (block_list_->Apply(remote_address)) [[unlikely]] {
   //   Debug(this, "Ignoring blocked remote address: %s", remote_address);
   //   return;
   // }
@@ -1453,7 +1522,7 @@ void Endpoint::Receive(const uv_buf_t& buf,
   // checks. It is critical at this point that we do as little work as possible
   // to avoid a DOS vector.
   std::shared_ptr<BackingStore> backing = env()->release_managed_buffer(buf);
-  if (UNLIKELY(!backing)) {
+  if (!backing) [[unlikely]] {
     // At this point something bad happened and we need to treat this as a fatal
     // case. There's likely no way to test this specific condition reliably.
     return Destroy(CloseContext::RECEIVE_FAILURE, UV_ENOMEM);
@@ -1477,9 +1546,9 @@ void Endpoint::Receive(const uv_buf_t& buf,
 
   // QUIC currently requires CID lengths of max NGTCP2_MAX_CIDLEN. Ignore any
   // packet with a non-standard CID length.
-  if (UNLIKELY(pversion_cid.dcidlen > NGTCP2_MAX_CIDLEN ||
-               pversion_cid.scidlen > NGTCP2_MAX_CIDLEN)) {
-    Debug(this, "Packet had incorrectly sized CIDs, igoring");
+  if (pversion_cid.dcidlen > NGTCP2_MAX_CIDLEN ||
+      pversion_cid.scidlen > NGTCP2_MAX_CIDLEN) [[unlikely]] {
+    Debug(this, "Packet had incorrectly sized CIDs, ignoring");
     return;  // Ignore the packet!
   }
 
@@ -1582,8 +1651,9 @@ bool Endpoint::is_listening() const {
 void Endpoint::MemoryInfo(MemoryTracker* tracker) const {
   tracker->TrackField("options", options_);
   tracker->TrackField("udp", udp_);
-  if (server_options_.has_value()) {
-    tracker->TrackField("server_options", server_options_.value());
+  if (server_state_.has_value()) {
+    tracker->TrackField("server_options", server_state_->options);
+    tracker->TrackField("server_tls_context", server_state_->tls_context);
   }
   tracker->TrackField("token_map", token_map_);
   tracker->TrackField("sessions", sessions_);
@@ -1648,7 +1718,7 @@ void Endpoint::New(const FunctionCallbackInfo<Value>& args) {
 void Endpoint::DoConnect(const FunctionCallbackInfo<Value>& args) {
   auto env = Environment::GetCurrent(args);
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
 
   // args[0] is a SocketAddress
   // args[1] is a Session OptionsObject (see session.cc)
@@ -1681,7 +1751,7 @@ void Endpoint::DoConnect(const FunctionCallbackInfo<Value>& args) {
 
 void Endpoint::DoListen(const FunctionCallbackInfo<Value>& args) {
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
   auto env = Environment::GetCurrent(args);
 
   Session::Options options;
@@ -1692,20 +1762,20 @@ void Endpoint::DoListen(const FunctionCallbackInfo<Value>& args) {
 
 void Endpoint::MarkBusy(const FunctionCallbackInfo<Value>& args) {
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
   endpoint->MarkAsBusy(args[0]->IsTrue());
 }
 
 void Endpoint::DoCloseGracefully(const FunctionCallbackInfo<Value>& args) {
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
   endpoint->CloseGracefully();
 }
 
 void Endpoint::LocalAddress(const FunctionCallbackInfo<Value>& args) {
   auto env = Environment::GetCurrent(args);
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
   if (endpoint->is_closed() || !endpoint->udp_.is_bound()) return;
   auto addr = SocketAddressBase::Create(
       env, std::make_shared<SocketAddress>(endpoint->local_address()));
@@ -1714,7 +1784,7 @@ void Endpoint::LocalAddress(const FunctionCallbackInfo<Value>& args) {
 
 void Endpoint::Ref(const FunctionCallbackInfo<Value>& args) {
   Endpoint* endpoint;
-  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.Holder());
+  ASSIGN_OR_RETURN_UNWRAP(&endpoint, args.This());
   auto env = Environment::GetCurrent(args);
   if (args[0]->BooleanValue(env->isolate())) {
     endpoint->udp_.Ref();

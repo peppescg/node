@@ -394,8 +394,8 @@ function versionSort(a, b) {
   b = minVersion(b).trim();
   let i = 0; // Common prefix length.
   while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  a = a.substr(i);
-  b = b.substr(i);
+  a = a.substring(i);
+  b = b.substring(i);
   return +b.match(numberRe)[0] - +a.match(numberRe)[0];
 }
 
@@ -428,8 +428,8 @@ export function buildToc({ filename, apilinks }) {
       const isDeprecationHeading =
         DEPRECATION_HEADING_PATTERN.test(headingText);
       if (isDeprecationHeading) {
-        if (!node.data) node.data = {};
-        if (!node.data.hProperties) node.data.hProperties = {};
+        node.data ||= {};
+        node.data.hProperties ||= {};
         node.data.hProperties.id =
           headingText.substring(0, headingText.indexOf(':'));
       }
@@ -528,7 +528,7 @@ function altDocs(filename, docCreated, versions) {
   return list ? `
     <li class="picker-header">
       <a href="#">
-        <span class="collapsed-arrow">&#x25ba;</span><span class="expanded-arrow">&#x25bc;</span>
+        <span class="picker-arrow"></span>
         Other versions
       </a>
       <div class="picker"><ol id="alt-docs">${list}</ol></div>
@@ -558,7 +558,7 @@ function gtocPicker(id) {
   return `
     <li class="picker-header">
       <a href="#">
-        <span class="collapsed-arrow">&#x25ba;</span><span class="expanded-arrow">&#x25bc;</span>
+        <span class="picker-arrow"></span>
         Index
       </a>
 
@@ -575,7 +575,7 @@ function tocPicker(id, content) {
   return `
     <li class="picker-header">
       <a href="#">
-        <span class="collapsed-arrow">&#x25ba;</span><span class="expanded-arrow">&#x25bc;</span>
+        <span class="picker-arrow"></span>
         Table of contents
       </a>
 

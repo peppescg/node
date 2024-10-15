@@ -15,10 +15,10 @@
 #include "bindingdata.h"
 #include "cid.h"
 #include "data.h"
+#include "defs.h"
 #include "tokens.h"
 
-namespace node {
-namespace quic {
+namespace node::quic {
 
 struct PathDescriptor {
   uint32_t version;
@@ -76,10 +76,7 @@ class Packet final : public ReqWrap<uv_udp_send_t> {
          const SocketAddress& destination,
          std::shared_ptr<Data> data);
 
-  Packet(const Packet&) = delete;
-  Packet(Packet&&) = delete;
-  Packet& operator=(const Packet&) = delete;
-  Packet& operator=(Packet&&) = delete;
+  DISALLOW_COPY_AND_MOVE(Packet)
 
   const SocketAddress& destination() const;
   size_t length() const;
@@ -149,8 +146,7 @@ class Packet final : public ReqWrap<uv_udp_send_t> {
   std::shared_ptr<Data> data_;
 };
 
-}  // namespace quic
-}  // namespace node
+}  // namespace node::quic
 
 #endif  // HAVE_OPENSSL && NODE_OPENSSL_HAS_QUIC
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
